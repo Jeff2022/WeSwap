@@ -1,9 +1,21 @@
 import React, {useState, useEffect, useRef} from 'react'
-import { getProvider, FUJI_RPC } from '../utils/contract'
+import { getInjectedProviders, getProvider, setInjectedProvider, FUJI_RPC } from '../utils/contract'
 import { formatEther } from 'ethers'
 import iconImg from '../../icon.jpg'
 
 const FUJI_CHAIN_ID = '0xa869' // 43113
+
+function getWalletName(provider, fallback = 'Wallet'){
+  if(!provider) return fallback
+  if(provider.isMetaMask) return 'MetaMask'
+  if(provider.isCoinbaseWallet) return 'Coinbase Wallet'
+  if(provider.isRabby) return 'Rabby Wallet'
+  if(provider.isBraveWallet) return 'Brave Wallet'
+  if(provider.isTrust) return 'Trust Wallet'
+  if(provider.isOKExWallet || provider.isOkxWallet) return 'OKX Wallet'
+  if(provider.isCore) return 'Core Wallet'
+  return fallback
+}
 
 export default function Header(){
   const [account, setAccount] = useState(null)
@@ -11,19 +23,38 @@ export default function Header(){
   const [balance, setBalance] = useState(null)
   const [copied, setCopied] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
+  const [walletPickerOpen, setWalletPickerOpen] = useState(false)
+  const [walletOptions, setWalletOptions] = useState([])
+  const [announcedProviders, setAnnouncedProviders] = useState([])
+  const [activeProvider, setActiveProvider] = useState(null)
   // when users click our Disconnect button, remember intent so UI stays disconnected
   const [manuallyDisconnected, setManuallyDisconnected] = useState(()=>{ try{ return localStorage.getItem('manuallyDisconnected') === '1'}catch(e){return false}})
   // ref to ignore provider events while a connect request is in progress
   const connectInProgressRef = useRef(false)
 
-  async function ensureFuji(){
-    if(!window.ethereum) return
+  function getWalletOptions(){
+    const options = new Map()
+    getInjectedProviders().forEach(provider => {
+      options.set(provider, { provider, name: getWalletName(provider) })
+    })
+    announcedProviders.forEach(({ info, provider }) => {
+      options.set(provider, {
+        provider,
+        name: info.name || getWalletName(provider),
+        icon: info.icon
+      })
+    })
+    return [...options.values()]
+  }
+
+  async function ensureFuji(provider = activeProvider){
+    if(!provider) return
     try{
-      const current = await window.ethereum.request({method:'eth_chainId'})
+      const current = await provider.request({method:'eth_chainId'})
       setChainId(current)
       if(current !== FUJI_CHAIN_ID){
         try{
-          await window.ethereum.request({
+          await provider.request({
             method: 'wallet_switchEthereumChain',
             params: [{ chainId: FUJI_CHAIN_ID }]
           })
@@ -32,7 +63,7 @@ export default function Header(){
           // 4902: chain not added
           if(switchErr?.code === 4902){
             try{
-              await window.ethereum.request({
+              await provider.request({
                 method: 'wallet_addEthereumChain',
                 params: [{
                   chainId: FUJI_CHAIN_ID,
@@ -68,16 +99,18 @@ export default function Header(){
     }
   }
 
-  async function connect(){
-    if(window.ethereum){
+  async function connect(provider = activeProvider){
+    if(provider){
       connectInProgressRef.current = true
       try{
-        const accs = await window.ethereum.request({method:'eth_requestAccounts'})
+        setInjectedProvider(provider)
+        setActiveProvider(provider)
+        const accs = await provider.request({method:'eth_requestAccounts'})
         const a = accs[0]
         setAccount(a)
         try{ localStorage.removeItem('manuallyDisconnected') }catch(e){}
         setManuallyDisconnected(false)
-        await ensureFuji()
+        await ensureFuji(provider)
         await updateBalance(a)
       }catch(e){
         // user canceled or other error — keep manual disconnect flag if present
@@ -86,12 +119,37 @@ export default function Header(){
         connectInProgressRef.current = false
       }
     }else{
-      alert('MetaMask or compatible wallet not found')
+      alert('No compatible wallet found')
+    }
+  }
+
+  async function openWalletPicker(){
+    const options = getWalletOptions()
+    if(options.length === 0){
+      alert('No compatible wallet found')
+    }else if(options.length === 1){
+      await connect(options[0].provider)
+    }else{
+      setWalletOptions(options)
+      setWalletPickerOpen(true)
     }
   }
 
   useEffect(()=>{
-    if(!window.ethereum) return
+    const handleProviderAnnouncement = (event) => {
+      const detail = event.detail
+      if(!detail?.provider) return
+      setAnnouncedProviders(prev => prev.some(item => item.provider === detail.provider) ? prev : [...prev, detail])
+    }
+
+    window.addEventListener('eip6963:announceProvider', handleProviderAnnouncement)
+    window.dispatchEvent(new Event('eip6963:requestProvider'))
+    return ()=> window.removeEventListener('eip6963:announceProvider', handleProviderAnnouncement)
+  },[])
+
+  useEffect(()=>{
+    const provider = activeProvider
+    if(!provider) return
     const handleAccounts = (accs)=>{
       // If a connect request is in progress, ignore account events until it settles
       if(connectInProgressRef.current) return
@@ -121,14 +179,14 @@ export default function Header(){
     }
 
     const addEthListener = (event, handler) => {
-      if(typeof window.ethereum.on === 'function') window.ethereum.on(event, handler)
-      else if(typeof window.ethereum.addListener === 'function') window.ethereum.addListener(event, handler)
+      if(typeof provider.on === 'function') provider.on(event, handler)
+      else if(typeof provider.addListener === 'function') provider.addListener(event, handler)
       else console.warn('No supported add-listener on window.ethereum')
     }
     const removeEthListener = (event, handler) => {
-      if(typeof window.ethereum.removeListener === 'function') window.ethereum.removeListener(event, handler)
-      else if(typeof window.ethereum.off === 'function') window.ethereum.off(event, handler)
-      else if(typeof window.ethereum.removeEventListener === 'function') window.ethereum.removeEventListener(event, handler)
+      if(typeof provider.removeListener === 'function') provider.removeListener(event, handler)
+      else if(typeof provider.off === 'function') provider.off(event, handler)
+      else if(typeof provider.removeEventListener === 'function') provider.removeEventListener(event, handler)
       else console.warn('No supported remove-listener on window.ethereum')
     }
 
@@ -141,10 +199,10 @@ export default function Header(){
         let persistedInit = false
         try{ persistedInit = localStorage.getItem('manuallyDisconnected') === '1' }catch(e){}
         if(!persistedInit){
-          const accs = await window.ethereum.request({method:'eth_accounts'})
+          const accs = await provider.request({method:'eth_accounts'})
           if(accs.length) { setAccount(accs[0]); updateBalance(accs[0]) }
         }
-        const cid = await window.ethereum.request({method:'eth_chainId'})
+        const cid = await provider.request({method:'eth_chainId'})
         setChainId(cid)
       }catch(e){/* ignore */}
     })()
@@ -152,7 +210,7 @@ export default function Header(){
       try{ removeEthListener('accountsChanged', handleAccounts) }catch(e){}
       try{ removeEthListener('chainChanged', handleChain) }catch(e){}
     }
-  },[manuallyDisconnected])
+  },[manuallyDisconnected, activeProvider])
 
   // refresh balance when account or chain changes
   useEffect(()=>{
@@ -191,45 +249,11 @@ export default function Header(){
         {balance && <div style={{fontSize:13}}>{parseFloat(balance).toFixed(4)} AVAX</div>}
         {account && !manuallyDisconnected ? (
           (()=>{
-          const detectWalletName = ()=>{
-            if(!window.ethereum) return 'Wallet'
-            try{
-              const w = window.ethereum
-              // If the provider exposes multiple providers (e.g., injected shims), prefer the explicitly-metaMask provider when present
-              if(Array.isArray(w.providers) && w.providers.length){
-                for(const p of w.providers){
-                  try{ if(p && p.isMetaMask) return 'MetaMask' }catch(e){}
-                }
-                // prefer other explicit flags
-                for(const p of w.providers){
-                  try{
-                    const keys = Object.getOwnPropertyNames(p||{}).map(s=>String(s).toLowerCase()).join(' ')
-                    const ctor = (p && p.constructor && p.constructor.name) ? p.constructor.name.toLowerCase() : ''
-                    if(keys.includes('core') || ctor.includes('ai')) return 'Core Wallet'
-                    if(p.isCoinbaseWallet) return 'Coinbase Wallet'
-                    if(keys.includes('walletconnect')) return 'WalletConnect'
-                  }catch(e){}
-                }
-              }
-
-              // single provider fallback
-              const p = w
-              if(p.isMetaMask) return 'MetaMask'
-              const ctor = (p && p.constructor && p.constructor.name) ? p.constructor.name.toLowerCase() : ''
-              const keys = Object.getOwnPropertyNames(p||{}).map(s=>String(s).toLowerCase()).join(' ')
-              if(keys.includes('core') || ctor.includes('ai')) return 'Core Wallet'
-              if(p.isCoinbaseWallet) return 'Coinbase Wallet'
-              if(keys.includes('walletconnect')) return 'WalletConnect'
-              if(ctor) return p.constructor.name
-            }catch(e){/* ignore */}
-            return 'Wallet'
-          }
-          const walletName = detectWalletName()
-          const ctorName = (window.ethereum && window.ethereum.constructor && window.ethereum.constructor.name) || ''
+          const walletName = getWalletName(activeProvider)
           return (
             <div style={{position:'relative'}} ref={menuRef}>
               <button onClick={toggleMenu} style={{fontFamily:'monospace'}}>
-                {account.slice(0,6)}...{account.slice(-4)}
+                {walletName}: {account.slice(0,6)}...{account.slice(-4)}
               </button>
               {copied && <span style={{fontSize:12,color:'#666',marginLeft:8}}>Copied</span>}
 
@@ -254,9 +278,27 @@ export default function Header(){
           )
           })()
         ) : (
-          <button onClick={connect}>Connect Wallet</button>
+          <button onClick={openWalletPicker}>Connect Wallet</button>
         )}
       </div>
+      {walletPickerOpen && (
+        <div role="dialog" aria-modal="true" aria-labelledby="wallet-picker-title" style={{position:'fixed',inset:0,display:'grid',placeItems:'center',padding:20,background:'rgba(0,0,0,0.4)',zIndex:1100}}>
+          <div style={{width:'min(360px, 100%)',background:'#fff',color:'#0D3A59',borderRadius:10,padding:20,boxShadow:'0 12px 32px rgba(0,0,0,0.24)'}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:12}}>
+              <h2 id="wallet-picker-title" style={{fontSize:18,margin:0}}>Choose a wallet</h2>
+              <button onClick={()=>setWalletPickerOpen(false)} aria-label="Close wallet selection" style={{padding:'4px 8px'}}>Close</button>
+            </div>
+            <div style={{display:'flex',flexDirection:'column',gap:8,marginTop:16}}>
+              {walletOptions.map(({ provider, name, icon }, index) => (
+                <button key={`${name}-${index}`} onClick={()=>{ setWalletPickerOpen(false); connect(provider) }} style={{display:'flex',alignItems:'center',gap:10,textAlign:'left',background:'#fff',color:'#0D3A59',border:'1px solid #d9dbe1'}}>
+                  {icon && <img src={icon} alt="" style={{width:24,height:24,borderRadius:4}} />}
+                  <span>{name}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </header>
   )
 }
